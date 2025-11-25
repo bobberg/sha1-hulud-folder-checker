@@ -69,6 +69,8 @@ python3 check-affected-packages.py --json /path/to/your/project
 
 ## What it Checks
 
+### Lock Files
+
 The scripts search for packages in various lock files:
 
 - `package-lock.json` (npm)
@@ -78,7 +80,27 @@ The scripts search for packages in various lock files:
 - `Gemfile.lock` (Ruby)
 - `Cargo.lock` (Rust)
 - `poetry.lock` (Python)
-- Any file matching `*lock*` pattern
+- `Pipfile.lock` (Python)
+- `go.sum` (Go)
+- `packages.lock.json` (NuGet)
+
+### Indicators of Compromise (IoCs)
+
+In addition to checking lock files, the scripts also detect active malware indicators:
+
+**Malicious Files:**
+- `bun_environment.js` - Post-install malware script
+- `trufflehog` - Downloaded credential stealer binary (Linux/Mac)
+- `trufflehog.exe` - Downloaded credential stealer binary (Windows)
+
+**Malicious Directories:**
+- `.truffler-cache/` - Hidden directory in project or home directory
+- `.truffler-cache/extract/` - Temporary extraction directory
+
+**Home Directory Check:**
+- Automatically scans `~/.truffler-cache` for malware binaries
+
+The scripts will show warnings if any IoCs are detected, indicating that the malware may have already executed on the system.
 
 ## Understanding the Output
 
@@ -88,6 +110,9 @@ The scripts search for packages in various lock files:
 === Affected Package Checker ===
 Packages file: /path/to/packages.txt
 Search directory: /path/to/project
+
+Checking for indicators of compromise (IoCs)...
+✓ No IoCs detected
 
 Found 500 unique package identifiers
 
@@ -105,6 +130,22 @@ Total matches: 1
 Affected files: 1
 ```
 
+**With IoCs detected:**
+
+```
+Checking for indicators of compromise (IoCs)...
+⚠ WARNING: Found indicators of compromise!
+  Malicious files:
+    ✗ /path/to/node_modules/.bin/bun_environment.js
+  Malicious directories:
+    ✗ /Users/username/.truffler-cache
+
+=== Summary ===
+Total matches: 1
+Affected files: 1
+IoCs found: 2
+```
+
 ### Python Version Output
 
 ```
@@ -112,9 +153,13 @@ Affected files: 1
 Packages file: /path/to/packages.txt
 Search directory: /path/to/project
 
+Checking for indicators of compromise (IoCs)...
+✓ No IoCs detected
+
 Extracting package identifiers...
 Found 500 unique package identifiers
 
+Building search pattern...
 Finding lock files...
 Found 2 lock file(s)
 
@@ -145,6 +190,10 @@ Matched packages:
   "affected_files": 1,
   "total_matches": 1,
   "matched_packages": ["@asyncapi/parser"],
+  "iocs": {
+    "malicious_file": ["/path/to/bun_environment.js"],
+    "malicious_directory": ["/Users/username/.truffler-cache"]
+  },
   "files": {
     "package-lock.json": [
       {
@@ -156,6 +205,8 @@ Matched packages:
   }
 }
 ```
+
+**Note:** The `iocs` field will be an empty object `{}` if no indicators of compromise are detected.
 
 ## Exit Codes
 
@@ -197,6 +248,33 @@ check_packages:
 
 - **Bash version**: Typically scans in 1-5 seconds for medium projects
 - **Python version**: Typically scans in 2-10 seconds, provides more detailed analysis
+- **IoC detection**: Adds minimal overhead (< 1 second) as it's optimized with single directory traversal
+
+Both scripts automatically skip common bloat directories (node_modules, .git, vendor, etc.) for maximum efficiency.
+
+## What To Do If IoCs Are Found
+
+If the scripts detect indicators of compromise:
+
+1. **Immediately disconnect** the affected system from the network
+2. **Do not run** any package manager commands (npm, yarn, etc.)
+3. **Check for credential theft**: The malware attempts to steal credentials using Trufflehog
+4. **Review your secrets**: Check for unauthorized access to:
+   - GitHub/GitLab tokens
+   - AWS/Azure credentials
+   - API keys
+   - SSH keys
+   - Environment variables
+5. **Rotate all credentials** that may have been exposed
+6. **Remove malicious files**:
+   ```bash
+   rm -rf ~/.truffler-cache
+   rm -f **/bun_environment.js
+   ```
+7. **Clean reinstall**: Delete `node_modules` and reinstall from clean lock files
+8. **Review process history**: Check for suspicious processes that may have run
+
+**Note:** If IoCs are found, your system may have already been compromised. Take immediate action to secure your credentials and systems.
 
 ## Customization
 

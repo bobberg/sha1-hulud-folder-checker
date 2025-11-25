@@ -129,6 +129,65 @@ def build_combined_regex(identifiers: Set[str]) -> Pattern:
     return re.compile(pattern)
 
 
+def check_for_iocs(search_dir: Path) -> Dict[str, List[Path]]:
+    """Check for indicators of compromise (IoCs) related to the SHA-1 attack"""
+    iocs_found = defaultdict(list)
+    
+    # Malicious files to look for (use set for O(1) lookup)
+    malicious_files = {'bun_environment.js', 'trufflehog', 'trufflehog.exe'}
+    
+    # Skip directories (combined with lock file search skip_dirs)
+    skip_dirs = {
+        'node_modules', '.git', '.svn', '.hg', 'vendor', 
+        'venv', '.venv', 'env', '.env', '__pycache__',
+        'dist', 'build', '.cache', '.tox', 'target'
+    }
+    
+    # Check for malicious files and directories
+    for root, dirs, files in os.walk(search_dir):
+        # Filter out skip directories in-place for efficiency
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        
+        root_path = Path(root)
+        root_str = str(root_path)
+        
+        # Quick check for .truffler-cache directory
+        if '.truffler-cache' in root_str:
+            iocs_found['malicious_directory'].append(root_path)
+        
+        # Check files only if any exist
+        if not files:
+            continue
+            
+        # Use set intersection for fast file matching
+        found_files = malicious_files.intersection(files)
+        for filename in found_files:
+            file_path = root_path / filename
+            
+            # Categorize by type
+            if filename == 'bun_environment.js':
+                if 'node_modules' in root_str:
+                    iocs_found['post_install_script'].append(file_path)
+                else:
+                    iocs_found['malicious_file'].append(file_path)
+            else:
+                iocs_found['malicious_file'].append(file_path)
+    
+    # Check home directory for .truffler-cache (fast, single check)
+    home_dir = Path.home()
+    truffler_cache = home_dir / '.truffler-cache'
+    if truffler_cache.exists():
+        if truffler_cache not in iocs_found['malicious_directory']:
+            iocs_found['malicious_directory'].append(truffler_cache)
+        
+        # Check for binaries using glob (faster than individual exists checks)
+        for binary_path in truffler_cache.glob('trufflehog*'):
+            if binary_path.is_file():
+                iocs_found['malicious_binary'].append(binary_path)
+    
+    return dict(iocs_found)
+
+
 def search_in_file(
     file_path: Path, pattern: Pattern, identifiers: Set[str]
 ) -> List[Tuple[int, str, str]]:
@@ -182,6 +241,23 @@ def main():
         print(f"{Colors.BLUE}=== Affected Package Checker ==={Colors.NC}")
         print(f"Packages file: {Colors.YELLOW}{packages_file}{Colors.NC}")
         print(f"Search directory: {Colors.YELLOW}{search_dir}{Colors.NC}")
+        print()
+    
+    # Check for IoCs first
+    if not output_json:
+        print(f"{Colors.BLUE}Checking for indicators of compromise (IoCs)...{Colors.NC}")
+    
+    iocs = check_for_iocs(search_dir)
+    
+    if iocs and not output_json:
+        print(f"{Colors.RED}⚠ WARNING: Found indicators of compromise!{Colors.NC}")
+        for ioc_type, paths in iocs.items():
+            print(f"  {Colors.MAGENTA}{ioc_type}:{Colors.NC}")
+            for path in paths:
+                print(f"    {Colors.RED}✗ {path}{Colors.NC}")
+        print()
+    elif not output_json:
+        print(f"{Colors.GREEN}✓ No IoCs detected{Colors.NC}")
         print()
 
     # Extract package identifiers
@@ -262,6 +338,10 @@ def main():
             "affected_files": len(results),
             "total_matches": sum(len(matches) for matches in results.values()),
             "matched_packages": sorted(matched_identifiers),
+            "iocs": {
+                ioc_type: [str(p) for p in paths]
+                for ioc_type, paths in iocs.items()
+            } if iocs else {},
             "files": {
                 str(file_path): [
                     {"line": line_num, "content": content, "package": pkg}
@@ -309,6 +389,9 @@ def main():
             )
             print(f"Affected files: {Colors.RED}{len(results)}{Colors.NC}")
             print(f"Total matches: {Colors.RED}{total_matches}{Colors.NC}")
+            if iocs:
+                total_iocs = sum(len(paths) for paths in iocs.values())
+                print(f"IoCs found: {Colors.RED}{total_iocs}{Colors.NC}")
             print()
             print(f"{Colors.MAGENTA}Matched packages:{Colors.NC}")
             for pkg in sorted(matched_identifiers):

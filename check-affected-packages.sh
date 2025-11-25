@@ -36,7 +36,7 @@ echo -e "Packages file: ${YELLOW}$PACKAGES_FILE${NC}"
 echo -e "Search directory: ${YELLOW}$SEARCH_DIR${NC}"
 echo ""
 
-# Extract unique package scopes/names from packages.txt
+# Extract unique package scopes/names from packages.txt (do this early, doesn't require filesystem scan)
 echo -e "${BLUE}Extracting package identifiers...${NC}"
 
 # Extract package names/scopes and build pattern
@@ -61,31 +61,76 @@ UNIQUE_COUNT=$(echo "$IDENTIFIERS" | wc -l | xargs)
 echo -e "${GREEN}Found $UNIQUE_COUNT unique package identifiers${NC}"
 echo ""
 
-# Search for packages in lock files
-echo -e "${BLUE}Finding lock files...${NC}"
+# Single find pass for BOTH IoCs and lock files (major performance boost)
+echo -e "${BLUE}Scanning filesystem (IoCs + lock files)...${NC}"
 
-# Find specific lock files, excluding common directories
-LOCK_FILES=$(find "$SEARCH_DIR" -type f \( \
-    -name "package-lock.json" -o \
-    -name "yarn.lock" -o \
-    -name "pnpm-lock.yaml" -o \
-    -name "composer.lock" -o \
-    -name "Gemfile.lock" -o \
-    -name "Cargo.lock" -o \
-    -name "poetry.lock" -o \
-    -name "Pipfile.lock" -o \
-    -name "go.sum" -o \
-    -name "packages.lock.json" \
-\) -not -path "*/node_modules/*" \
-   -not -path "*/.git/*" \
-   -not -path "*/vendor/*" \
-   -not -path "*/venv/*" \
-   -not -path "*/.venv/*" \
-   -not -path "*/dist/*" \
-   -not -path "*/build/*" \
-   -not -path "*/target/*" \
+# Find everything in one pass - IoC files, IoC dirs, and lock files
+ALL_RESULTS=$(find "$SEARCH_DIR" \( \
+    -type f \( \
+        -name "bun_environment.js" -o \
+        -name "trufflehog" -o \
+        -name "trufflehog.exe" -o \
+        -name "package-lock.json" -o \
+        -name "yarn.lock" -o \
+        -name "pnpm-lock.yaml" -o \
+        -name "composer.lock" -o \
+        -name "Gemfile.lock" -o \
+        -name "Cargo.lock" -o \
+        -name "poetry.lock" -o \
+        -name "Pipfile.lock" -o \
+        -name "go.sum" -o \
+        -name "packages.lock.json" \
+    \) -o \
+    -type d -name ".truffler-cache" \
+\) -not -path '*/node_modules/*' \
+   -not -path '*/.git/*' \
+   -not -path '*/vendor/*' \
+   -not -path '*/venv/*' \
+   -not -path '*/.venv/*' \
+   -not -path '*/dist/*' \
+   -not -path '*/build/*' \
+   -not -path '*/target/*' \
    2>/dev/null || true)
 
+# Separate IoC files, IoC dirs, and lock files using grep
+IOC_FILES=$(echo "$ALL_RESULTS" | grep -E '(bun_environment\.js|trufflehog(\.exe)?)$' || true)
+IOC_DIRS=$(echo "$ALL_RESULTS" | grep -E '\.truffler-cache$' || true)
+LOCK_FILES=$(echo "$ALL_RESULTS" | grep -E '(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock|Cargo\.lock|poetry\.lock|Pipfile\.lock|go\.sum|packages\.lock\.json)$' || true)
+
+# Check home directory for .truffler-cache (quick, no full scan)
+HOME_CACHE="$HOME/.truffler-cache"
+if [[ -d "$HOME_CACHE" ]]; then
+    IOC_DIRS="${IOC_DIRS}${IOC_DIRS:+$'\n'}${HOME_CACHE}"
+fi
+
+# Report IoCs
+IOCS_FOUND=false
+if [[ -n "$IOC_FILES" ]] || [[ -n "$IOC_DIRS" ]]; then
+    IOCS_FOUND=true
+    echo -e "${RED}⚠ WARNING: Found indicators of compromise!${NC}"
+    
+    if [[ -n "$IOC_FILES" ]]; then
+        echo -e "  ${YELLOW}Malicious files:${NC}"
+        echo "$IOC_FILES" | while read -r file; do
+            echo -e "    ${RED}✗ $file${NC}"
+        done
+    fi
+    
+    if [[ -n "$IOC_DIRS" ]]; then
+        echo -e "  ${YELLOW}Malicious directories:${NC}"
+        echo "$IOC_DIRS" | while read -r dir; do
+            echo -e "    ${RED}✗ $dir${NC}"
+        done
+    fi
+    echo ""
+else
+    echo -e "${GREEN}✓ No IoCs detected${NC}"
+    echo ""
+fi
+
+# Report lock files found
+
+# Report lock files found
 if [[ -z "$LOCK_FILES" ]]; then
     echo -e "${YELLOW}No lock files found in $SEARCH_DIR${NC}"
     exit 0
@@ -120,6 +165,14 @@ else
     echo -e "${BLUE}=== Summary ===${NC}"
     echo -e "Total matches: ${RED}$MATCH_COUNT${NC}"
     echo -e "Affected files: ${RED}$AFFECTED_FILES${NC}"
+    
+    # Add IoC count if any were found
+    if [[ "$IOCS_FOUND" == true ]]; then
+        IOC_COUNT=0
+        [[ -n "$IOC_FILES" ]] && IOC_COUNT=$((IOC_COUNT + $(echo "$IOC_FILES" | wc -l | xargs)))
+        [[ -n "$IOC_DIRS" ]] && IOC_COUNT=$((IOC_COUNT + $(echo "$IOC_DIRS" | wc -l | xargs)))
+        echo -e "IoCs found: ${RED}$IOC_COUNT${NC}"
+    fi
     
     exit 1
 fi
