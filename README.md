@@ -2,6 +2,8 @@
 
 Scripts to detect if affected packages from the SHA-1 supply chain compromise are present in your project's lock files.
 
+> **Note:** This checker currently contains the list of 1000+ affected packages identified as of November 25, 2025, based on the analysis from Semgrep's article: [Digging for Secrets: SHA1-Hulud, the Second Coming of the npm Worm](https://semgrep.dev/blog/2025/digging-for-secrets-sha1-hulud-the-second-coming-of-the-npm-worm/). The list may be updated as more affected packages are discovered.
+
 ## Overview
 
 This repository contains two scripts that scan lock files for over 1000 packages affected by the SHA-1 supply chain attack:
