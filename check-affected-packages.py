@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Script to check if a folder contains any of the affected packages from packages.txt
-Provides better performance and more detailed reporting than the bash version.
+Optimized version with compiled regex and parallel processing.
 
 Usage:
     python3 check-affected-packages.py [directory]
@@ -14,7 +14,8 @@ import sys
 import json
 from pathlib import Path
 from collections import defaultdict
-from typing import Set, Dict, List, Tuple
+from typing import Set, Dict, List, Tuple, Pattern
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ANSI color codes
@@ -60,10 +61,9 @@ def extract_package_identifiers(packages_file: Path) -> Set[str]:
 
 
 def find_lock_files(search_dir: Path) -> List[Path]:
-    """Find all lock files in the directory"""
-    lock_patterns = [
-        "*lock*",
-        "*.lock",
+    """Find all lock files in the directory, excluding common ignore patterns"""
+    # Specific lock file names to search for
+    specific_files = [
         "package-lock.json",
         "yarn.lock",
         "pnpm-lock.yaml",
@@ -71,21 +71,69 @@ def find_lock_files(search_dir: Path) -> List[Path]:
         "Gemfile.lock",
         "Cargo.lock",
         "poetry.lock",
+        "Pipfile.lock",
+        "go.sum",
+        "packages.lock.json",
     ]
 
-    lock_files = []
-    for pattern in lock_patterns:
-        lock_files.extend(search_dir.rglob(pattern))
+    # Directories to skip
+    skip_dirs = {
+        "node_modules",
+        ".git",
+        ".svn",
+        ".hg",
+        "vendor",
+        "venv",
+        ".venv",
+        "env",
+        ".env",
+        "__pycache__",
+        "dist",
+        "build",
+        ".cache",
+        ".tox",
+        "target",
+    }
 
-    # Remove duplicates and sort
-    return sorted(set(f for f in lock_files if f.is_file()))
+    lock_files = []
+
+    # Walk the directory tree manually to skip unwanted directories
+    for root, dirs, files in os.walk(search_dir):
+        # Remove skip directories from dirs list (modifies in-place)
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+
+        for filename in files:
+            if filename in specific_files:
+                file_path = Path(root) / filename
+                # Skip files larger than 50MB (likely not real lock files)
+                try:
+                    if file_path.stat().st_size < 50 * 1024 * 1024:
+                        lock_files.append(file_path)
+                except OSError:
+                    pass
+
+    return sorted(lock_files)
+
+
+def build_combined_regex(identifiers: Set[str]) -> Pattern:
+    """Build a single compiled regex pattern from all identifiers"""
+    # Sort by length (longest first) to match more specific patterns first
+    sorted_identifiers = sorted(identifiers, key=len, reverse=True)
+
+    # Escape special regex characters and build pattern
+    escaped = [re.escape(ident) for ident in sorted_identifiers]
+
+    # Use non-capturing groups and word boundaries
+    pattern = r"\b(?:" + "|".join(escaped) + r")\b"
+
+    return re.compile(pattern)
 
 
 def search_in_file(
-    file_path: Path, identifiers: Set[str]
+    file_path: Path, pattern: Pattern, identifiers: Set[str]
 ) -> List[Tuple[int, str, str]]:
     """
-    Search for package identifiers in a file
+    Search for package identifiers in a file using compiled regex
     Returns list of (line_number, line_content, matched_identifier)
     """
     matches = []
@@ -93,13 +141,11 @@ def search_in_file(
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             for line_num, line in enumerate(f, 1):
-                for identifier in identifiers:
-                    # Escape special regex characters
-                    escaped = re.escape(identifier)
-                    # Look for the identifier with word boundaries
-                    if re.search(rf"\b{escaped}\b", line):
-                        matches.append((line_num, line.strip(), identifier))
-                        break  # Only count each line once
+                # Use the compiled pattern for fast searching
+                match = pattern.search(line)
+                if match:
+                    matched_text = match.group(0)
+                    matches.append((line_num, line.strip(), matched_text))
     except Exception as e:
         print(f"{Colors.RED}Error reading {file_path}: {e}{Colors.NC}", file=sys.stderr)
 
@@ -150,6 +196,12 @@ def main():
         )
         print()
 
+    # Build compiled regex pattern for fast searching
+    if not output_json:
+        print(f"{Colors.BLUE}Building search pattern...{Colors.NC}")
+
+    pattern = build_combined_regex(identifiers)
+
     # Find lock files
     if not output_json:
         print(f"{Colors.BLUE}Finding lock files...{Colors.NC}")
@@ -173,15 +225,33 @@ def main():
         print(f"{Colors.BLUE}Searching for affected packages...{Colors.NC}")
         print()
 
-    # Search for matches
+    # Search for matches using parallel processing
     results = defaultdict(list)
     matched_identifiers = set()
 
-    for lock_file in lock_files:
-        matches = search_in_file(lock_file, identifiers)
-        if matches:
-            results[lock_file] = matches
-            matched_identifiers.update(m[2] for m in matches)
+    # Use ThreadPoolExecutor for parallel file processing
+    max_workers = min(10, len(lock_files))  # Cap at 10 threads
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all file searches
+        future_to_file = {
+            executor.submit(search_in_file, lock_file, pattern, identifiers): lock_file
+            for lock_file in lock_files
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_file):
+            lock_file = future_to_file[future]
+            try:
+                matches = future.result()
+                if matches:
+                    results[lock_file] = matches
+                    matched_identifiers.update(m[2] for m in matches)
+            except Exception as e:
+                print(
+                    f"{Colors.RED}Error processing {lock_file}: {e}{Colors.NC}",
+                    file=sys.stderr,
+                )
 
     # Output results
     if output_json:

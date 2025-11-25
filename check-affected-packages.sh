@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 # Script to check if a folder contains any of the affected packages from packages.txt
+# Optimized version with proper lock file detection and exclusions
 # Usage: ./check-affected-packages.sh [directory]
 # If no directory is provided, it searches the current directory
 
@@ -36,38 +37,54 @@ echo -e "Search directory: ${YELLOW}$SEARCH_DIR${NC}"
 echo ""
 
 # Extract unique package scopes/names from packages.txt
-# This handles both scoped packages (@scope/package) and non-scoped packages
 echo -e "${BLUE}Extracting package identifiers...${NC}"
 
-# Create a regex pattern from the packages
-# For scoped packages like @asyncapi/parser@1.0.0, we extract @asyncapi
-# For non-scoped packages like lodash@1.0.0, we extract lodash
-SCOPES=$(grep -oE '^(@[^/]+|[^@]+)' "$PACKAGES_FILE" | sort -u)
+# Extract package names/scopes and build pattern
+# For @scope/package@version, extract full package name @scope/package
+IDENTIFIERS=$(awk -F'@' '
+    /^@/ { 
+        # Scoped package: extract @scope/package
+        if (match($0, /^@[^@]+/)) {
+            print substr($0, RSTART, RLENGTH)
+        }
+    }
+    /^[^@]/ { 
+        # Non-scoped: extract package name
+        print $1
+    }
+' "$PACKAGES_FILE" | sort -u)
 
-# Build regex pattern
-# Group scoped packages together
-SCOPED_PATTERN=$(echo "$SCOPES" | grep '^@' | sed 's/@/\\@/g' | paste -sd '|' -)
-NONSCOPED_PATTERN=$(echo "$SCOPES" | grep -v '^@' | sed 's/\./\\./g' | paste -sd '|' -)
+# Build grep pattern with proper escaping
+PATTERN=$(echo "$IDENTIFIERS" | sed 's/[.[\*^$()+?{|]/\\&/g' | paste -sd '|' -)
 
-# Combine patterns
-if [[ -n "$SCOPED_PATTERN" && -n "$NONSCOPED_PATTERN" ]]; then
-    PATTERN="($SCOPED_PATTERN|$NONSCOPED_PATTERN)"
-elif [[ -n "$SCOPED_PATTERN" ]]; then
-    PATTERN="($SCOPED_PATTERN)"
-else
-    PATTERN="($NONSCOPED_PATTERN)"
-fi
-
-UNIQUE_COUNT=$(echo "$SCOPES" | wc -l | xargs)
+UNIQUE_COUNT=$(echo "$IDENTIFIERS" | wc -l | xargs)
 echo -e "${GREEN}Found $UNIQUE_COUNT unique package identifiers${NC}"
 echo ""
 
 # Search for packages in lock files
-echo -e "${BLUE}Searching for affected packages in lock files...${NC}"
-echo ""
+echo -e "${BLUE}Finding lock files...${NC}"
 
-# Find all lock files first
-LOCK_FILES=$(find "$SEARCH_DIR" -type f \( -name "*lock*" -o -name "*.lock" \) 2>/dev/null)
+# Find specific lock files, excluding common directories
+LOCK_FILES=$(find "$SEARCH_DIR" -type f \( \
+    -name "package-lock.json" -o \
+    -name "yarn.lock" -o \
+    -name "pnpm-lock.yaml" -o \
+    -name "composer.lock" -o \
+    -name "Gemfile.lock" -o \
+    -name "Cargo.lock" -o \
+    -name "poetry.lock" -o \
+    -name "Pipfile.lock" -o \
+    -name "go.sum" -o \
+    -name "packages.lock.json" \
+\) -not -path "*/node_modules/*" \
+   -not -path "*/.git/*" \
+   -not -path "*/vendor/*" \
+   -not -path "*/venv/*" \
+   -not -path "*/.venv/*" \
+   -not -path "*/dist/*" \
+   -not -path "*/build/*" \
+   -not -path "*/target/*" \
+   2>/dev/null || true)
 
 if [[ -z "$LOCK_FILES" ]]; then
     echo -e "${YELLOW}No lock files found in $SEARCH_DIR${NC}"
@@ -78,8 +95,11 @@ LOCK_FILE_COUNT=$(echo "$LOCK_FILES" | wc -l | xargs)
 echo -e "${GREEN}Found $LOCK_FILE_COUNT lock file(s)${NC}"
 echo ""
 
-# Search for matches
-MATCHES=$(grep -rE --include='*lock*' --include='*.lock' "$PATTERN" "$SEARCH_DIR" 2>/dev/null || true)
+echo -e "${BLUE}Searching for affected packages...${NC}"
+echo ""
+
+# Search for matches using the list of files
+MATCHES=$(echo "$LOCK_FILES" | xargs grep -E "$PATTERN" 2>/dev/null || true)
 
 if [[ -z "$MATCHES" ]]; then
     echo -e "${GREEN}✓ No affected packages found${NC}"
